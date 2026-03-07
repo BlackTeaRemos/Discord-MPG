@@ -7,6 +7,7 @@ import type { IDisplayGroup } from '../../Domain/GameObject/Display/IDisplayGrou
 import type { IParameterDisplayConfig } from '../../Domain/GameObject/Display/IParameterDisplayConfig.js';
 import type { ObjectDetail } from '../Object/FetchObjectDetail.js';
 import { RenderObjectCard } from '../../Framework/ImageGen/ObjectCardRenderer.js';
+import { ResolveDefaultProjectionStyle } from '../../Domain/GameObject/Display/ProjectionStyleDefaults.js';
 import { Log } from '../../Common/Log.js';
 
 const LOG_TAG = `Flow/GameObject/RenderProjectedCardPreview`;
@@ -25,12 +26,14 @@ export async function RenderProjectedCardPreview(
         }
 
         const configMap = template.projectionDisplayConfigs;
-        if (!configMap || !configMap[displayStyle]) {
-            return null;
-        }
+        let resolvedConfig: ITemplateDisplayConfig;
 
-        const profile = configMap[displayStyle];
-        const resolvedConfig = ResolveProfileToDisplayConfig(profile, template.displayConfig);
+        if (configMap && configMap[displayStyle]) {
+            const profile = configMap[displayStyle];
+            resolvedConfig = ResolveProfileToDisplayConfig(profile, template.displayConfig);
+        } else {
+            resolvedConfig = ResolveDefaultProjectionStyle(displayStyle) ?? { groups: [], parameterDisplay: [] };
+        }
 
         let detail: ObjectDetail | null = null;
         try {

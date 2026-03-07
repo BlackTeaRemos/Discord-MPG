@@ -140,6 +140,15 @@ export const ValidateResponseSchema = {
     },
 } as const;
 
+export const ValidationErrorResponseSchema = {
+    type: `object`,
+    properties: {
+        error: { type: `string`, description: `Summary error message` },
+        structuralErrors: { type: `array`, items: { type: `string` }, description: `Schema and structure errors` },
+        expressionErrors: { type: `array`, items: ExpressionValidationErrorSchema, description: `Per-expression syntax errors` },
+    },
+} as const;
+
 export const CrossReferenceErrorSchema = {
     type: `object`,
     properties: {

@@ -8,6 +8,8 @@
  */
 export type CrossObjectState = Record<string, Array<Record<string, number>>>;
 
+export type OrganizationScopedCrossObjectState = CrossObjectState;
+
 /** @brief Result of a single expression evaluation */
 export interface ExpressionResult {
     /** Whether the expression was evaluated without error @example true */
@@ -21,6 +23,9 @@ export interface ExpressionResult {
 export interface ExpressionTarget {
     /** Whether this expression targets a remote object */
     isInlineTarget: boolean;
+
+    /** Whether this inline target is organization scoped via the own qualifier */
+    isOrganizationScoped?: boolean;
 
     /** Local parameter key when isInlineTarget is false @example 'output' */
     localKey?: string;
@@ -40,6 +45,9 @@ export class ExpressionEvaluator {
     /** Assignment pattern matching inline cross object targets */
     private static readonly _INLINE_TARGET_PATTERN = /^@([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\s*([\+\-\*\/]?=)\s*(.+)$/;
 
+    /** Assignment pattern matching organization scoped inline cross object targets */
+    private static readonly _ORG_SCOPED_INLINE_TARGET_PATTERN = /^@own\.([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\s*([\+\-\*\/]?=)\s*(.+)$/;
+
     /**
      * @brief Parses target information from an expression without evaluating it
      * @param expression string Expression to parse the left hand side from @example '@Mine.oreOutput -= 5'
@@ -51,10 +59,21 @@ export class ExpressionEvaluator {
     public ParseTarget(expression: string): ExpressionTarget {
         const trimmed = expression.trim();
 
+        const orgScopedMatch = ExpressionEvaluator._ORG_SCOPED_INLINE_TARGET_PATTERN.exec(trimmed);
+        if (orgScopedMatch) {
+            return {
+                isInlineTarget: true,
+                isOrganizationScoped: true,
+                templateName: orgScopedMatch[1],
+                remoteKey: orgScopedMatch[2],
+            };
+        }
+
         const inlineMatch = ExpressionEvaluator._INLINE_TARGET_PATTERN.exec(trimmed);
         if (inlineMatch) {
             return {
                 isInlineTarget: true,
+                isOrganizationScoped: false,
                 templateName: inlineMatch[1],
                 remoteKey: inlineMatch[2],
             };
@@ -87,11 +106,29 @@ export class ExpressionEvaluator {
         expression: string,
         crossObjectState?: CrossObjectState,
         targetState?: Record<string, number>,
+        organizationScopedState?: OrganizationScopedCrossObjectState,
     ): ExpressionResult {
         try {
             const trimmed = expression.trim();
 
-            // Try inline target pattern first
+            const orgScopedMatch = ExpressionEvaluator._ORG_SCOPED_INLINE_TARGET_PATTERN.exec(trimmed);
+            if (orgScopedMatch) {
+                const remoteKey = orgScopedMatch[2];
+                const operator = orgScopedMatch[3];
+                const rightHandSide = orgScopedMatch[4];
+
+                const mutationTarget = targetState ?? state;
+
+                if (!(remoteKey in mutationTarget)) {
+                    return { success: false, error: `Unknown target variable: "${remoteKey}" on org-scoped inline target.` };
+                }
+
+                const rightValue = this.__EvaluateRightHandSide(state, rightHandSide, crossObjectState, organizationScopedState);
+                mutationTarget[remoteKey] = this.__ApplyOperator(mutationTarget[remoteKey], operator, rightValue);
+
+                return { success: true };
+            }
+
             const inlineMatch = ExpressionEvaluator._INLINE_TARGET_PATTERN.exec(trimmed);
             if (inlineMatch) {
                 const remoteKey = inlineMatch[2];
@@ -104,13 +141,12 @@ export class ExpressionEvaluator {
                     return { success: false, error: `Unknown target variable: "${remoteKey}" on inline target.` };
                 }
 
-                const rightValue = this.__EvaluateRightHandSide(state, rightHandSide, crossObjectState);
+                const rightValue = this.__EvaluateRightHandSide(state, rightHandSide, crossObjectState, organizationScopedState);
                 mutationTarget[remoteKey] = this.__ApplyOperator(mutationTarget[remoteKey], operator, rightValue);
 
                 return { success: true };
             }
 
-            // Local assignment pattern
             const localMatch = ExpressionEvaluator._LOCAL_ASSIGNMENT_PATTERN.exec(trimmed);
             if (!localMatch) {
                 return { success: false, error: `Invalid expression syntax: "${expression}". Expected: target operator expression.` };
@@ -124,7 +160,7 @@ export class ExpressionEvaluator {
                 return { success: false, error: `Unknown target variable: "${targetKey}".` };
             }
 
-            const rightValue = this.__EvaluateRightHandSide(state, rightHandSide, crossObjectState);
+            const rightValue = this.__EvaluateRightHandSide(state, rightHandSide, crossObjectState, organizationScopedState);
             state[targetKey] = this.__ApplyOperator(state[targetKey], operator, rightValue);
 
             return { success: true };
@@ -147,11 +183,12 @@ export class ExpressionEvaluator {
         state: Record<string, number>,
         expressions: string[],
         crossObjectState?: CrossObjectState,
+        organizationScopedState?: OrganizationScopedCrossObjectState,
     ): ExpressionResult[] {
         const results: ExpressionResult[] = [];
 
         for (const expression of expressions) {
-            const result = this.Evaluate(state, expression, crossObjectState);
+            const result = this.Evaluate(state, expression, crossObjectState, undefined, organizationScopedState);
             results.push(result);
 
             if (!result.success) {
@@ -177,7 +214,26 @@ export class ExpressionEvaluator {
         try {
             const trimmed = expression.trim();
 
-            // Try inline target pattern first
+            const orgScopedMatch = ExpressionEvaluator._ORG_SCOPED_INLINE_TARGET_PATTERN.exec(trimmed);
+            if (orgScopedMatch) {
+                const rightHandSide = orgScopedMatch[4];
+
+                const tokens = this.__Tokenize(rightHandSide);
+                const dummyState: Record<string, number> = {};
+                for (const key of knownKeys) {
+                    dummyState[key] = 0;
+                }
+
+                const parser = new TokenParser(tokens, dummyState);
+                parser.ParseExpression();
+
+                if (!parser.IsAtEnd()) {
+                    errors.push(`Unexpected token after expression: "${parser.CurrentToken()}".`);
+                }
+
+                return errors;
+            }
+
             const inlineMatch = ExpressionEvaluator._INLINE_TARGET_PATTERN.exec(trimmed);
             if (inlineMatch) {
                 const rightHandSide = inlineMatch[4];
@@ -246,9 +302,10 @@ export class ExpressionEvaluator {
         state: Record<string, number>,
         expression: string,
         crossObjectState?: CrossObjectState,
+        organizationScopedState?: OrganizationScopedCrossObjectState,
     ): number {
         const tokens = this.__Tokenize(expression);
-        const parser = new TokenParser(tokens, state, crossObjectState);
+        const parser = new TokenParser(tokens, state, crossObjectState, organizationScopedState);
         const result = parser.ParseExpression();
 
         if (!parser.IsAtEnd()) {
@@ -375,6 +432,7 @@ class TokenParser {
         private readonly _tokens: string[],
         private readonly _state: Record<string, number>,
         private readonly _crossObjectState?: CrossObjectState,
+        private readonly _organizationScopedState?: OrganizationScopedCrossObjectState,
     ) {}
 
     /**
@@ -543,50 +601,76 @@ class TokenParser {
     }
 
     /**
-     * @brief Parses a cross object reference after the at token has been consumed returning the first matching value
+     * @brief Parses a cross object reference after the at token has been consumed returning the value when exactly one object matches or throwing on ambiguity
      * @returns number Resolved value
      */
     private __ParseCrossObjectReference(): number {
-        const templateName = this._tokens[this._position];
+        const firstToken = this._tokens[this._position];
 
-        if (!templateName || !/^[a-zA-Z_]/.test(templateName)) {
+        if (!firstToken || !/^[a-zA-Z_]/.test(firstToken)) {
             throw new Error(`Expected template name after "@".`);
         }
 
-        this._position++;
+        let isOrgScoped = false;
+        let templateName: string;
+
+        if (firstToken === `own`) {
+            isOrgScoped = true;
+            this._position++;
+
+            if (!this.__Match(`.`)) {
+                throw new Error(`Expected "." after "@own" in organization-scoped reference.`);
+            }
+
+            templateName = this._tokens[this._position];
+            if (!templateName || !/^[a-zA-Z_]/.test(templateName)) {
+                throw new Error(`Expected template name after "@own.".`);
+            }
+            this._position++;
+        } else {
+            templateName = firstToken;
+            this._position++;
+        }
 
         if (!this.__Match(`.`)) {
-            throw new Error(`Expected "." after template name in cross-object reference "@${templateName}".`);
+            throw new Error(`Expected "." after template name in cross-object reference "@${isOrgScoped ? 'own.' : ''}${templateName}".`);
         }
 
         const paramKey = this._tokens[this._position];
 
         if (!paramKey || !/^[a-zA-Z_]/.test(paramKey)) {
-            throw new Error(`Expected parameter key after "@${templateName}.".`);
+            throw new Error(`Expected parameter key after "@${isOrgScoped ? 'own.' : ''}${templateName}.".`);
         }
 
         this._position++;
 
-        if (!this._crossObjectState) {
-            throw new Error(`Cross-object reference "@${templateName}.${paramKey}" used but no cross-object state is available.`);
+        const resolveState = isOrgScoped ? this._organizationScopedState : this._crossObjectState;
+        const scopeLabel = isOrgScoped ? `organization-scoped ` : ``;
+
+        if (!resolveState) {
+            throw new Error(`Cross-object reference "@${isOrgScoped ? 'own.' : ''}${templateName}.${paramKey}" used but no ${scopeLabel}cross-object state is available.`);
         }
 
-        const objectsOfTemplate = this._crossObjectState[templateName];
+        const objectsOfTemplate = resolveState[templateName];
 
         if (!objectsOfTemplate || objectsOfTemplate.length === 0) {
-            throw new Error(`No objects found for template "${templateName}" in cross-object state.`);
+            throw new Error(`No objects found for template "${templateName}" in ${scopeLabel}cross-object state.`);
         }
 
-        // Return the value from the first matching object that has the key
-        const firstMatch = objectsOfTemplate.find(objectState => {
+        const matchingObjects = objectsOfTemplate.filter(objectState => {
             return paramKey in objectState;
         });
 
-        if (!firstMatch) {
+        if (matchingObjects.length === 0) {
             throw new Error(`Parameter "${paramKey}" not found on any "${templateName}" object.`);
         }
 
-        return firstMatch[paramKey];
+        if (matchingObjects.length > 1) {
+            const prefix = isOrgScoped ? `@own.` : `@`;
+            throw new Error(`Ambiguous scalar reference "${prefix}${templateName}.${paramKey}" matched ${matchingObjects.length} objects. Use sum(${prefix}${templateName}.${paramKey}) or avg(${prefix}${templateName}.${paramKey}) for aggregation.`);
+        }
+
+        return matchingObjects[0][paramKey];
     }
 
     /**
@@ -595,15 +679,18 @@ class TokenParser {
      * @param paramKey string Parameter key on the referenced objects
      * @returns number array Values from all matching objects
      */
-    private __ResolveCrossObjectValues(templateName: string, paramKey: string): number[] {
-        if (!this._crossObjectState) {
-            throw new Error(`Cross-object reference "@${templateName}.${paramKey}" used but no cross-object state is available.`);
+    private __ResolveCrossObjectValues(templateName: string, paramKey: string, isOrgScoped: boolean = false): number[] {
+        const resolveState = isOrgScoped ? this._organizationScopedState : this._crossObjectState;
+        const scopeLabel = isOrgScoped ? `organization-scoped ` : ``;
+
+        if (!resolveState) {
+            throw new Error(`Cross-object reference "@${isOrgScoped ? 'own.' : ''}${templateName}.${paramKey}" used but no ${scopeLabel}cross-object state is available.`);
         }
 
-        const objectsOfTemplate = this._crossObjectState[templateName];
+        const objectsOfTemplate = resolveState[templateName];
 
         if (!objectsOfTemplate || objectsOfTemplate.length === 0) {
-            throw new Error(`No objects found for template "${templateName}" in cross-object state.`);
+            throw new Error(`No objects found for template "${templateName}" in ${scopeLabel}cross-object state.`);
         }
 
         const values: number[] = [];
@@ -660,9 +747,20 @@ class TokenParser {
      * @returns number Aggregated result
      */
     private __ParseAggregateFunction(functionName: string): number {
-        // Consume the at token
         if (!this.__Match(`@`)) {
             throw new Error(`Expected '@' in aggregate function "${functionName}".`);
+        }
+
+        let isOrgScoped = false;
+        const firstToken = this._tokens[this._position];
+
+        if (firstToken === `own`) {
+            isOrgScoped = true;
+            this._position++;
+
+            if (!this.__Match(`.`)) {
+                throw new Error(`Expected "." after "own" in aggregate function "${functionName}(@own...)".`);
+            }
         }
 
         const templateName = this._tokens[this._position];
@@ -672,12 +770,12 @@ class TokenParser {
         this._position++;
 
         if (!this.__Match(`.`)) {
-            throw new Error(`Expected "." after template name in "${functionName}(@${templateName}...)".`);
+            throw new Error(`Expected "." after template name in "${functionName}(@${isOrgScoped ? 'own.' : ''}${templateName}...)".`);
         }
 
         const paramKey = this._tokens[this._position];
         if (!paramKey || !/^[a-zA-Z_]/.test(paramKey)) {
-            throw new Error(`Expected parameter key in "${functionName}(@${templateName}.)".`);
+            throw new Error(`Expected parameter key in "${functionName}(@${isOrgScoped ? 'own.' : ''}${templateName}.)".`);
         }
         this._position++;
 
@@ -685,7 +783,7 @@ class TokenParser {
             throw new Error(`Expected ')' after aggregate reference in "${functionName}".`);
         }
 
-        const values = this.__ResolveCrossObjectValues(templateName, paramKey);
+        const values = this.__ResolveCrossObjectValues(templateName, paramKey, isOrgScoped);
 
         switch (functionName) {
             case `sum`:

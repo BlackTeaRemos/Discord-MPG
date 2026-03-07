@@ -7,7 +7,7 @@ import type { IParameterValue } from '../../Domain/GameObject/Entity/IParameterV
 import type { ITurnActionEngine } from '../../Domain/GameObject/Action/ITurnActionEngine.js';
 import type { IGameObjectRepository } from '../../Domain/GameObject/Repository/IGameObjectRepository.js';
 import type { IGameObjectTemplateRepository } from '../../Domain/GameObject/Repository/IGameObjectTemplateRepository.js';
-import { ExpressionEvaluator, type CrossObjectState } from './ExpressionEvaluator.js';
+import { ExpressionEvaluator, type CrossObjectState, type OrganizationScopedCrossObjectState } from './ExpressionEvaluator.js';
 
 /** Module level tag for logging */
 const LOG_TAG = `Flow/GameObject/TurnActionEngine`;
@@ -58,6 +58,8 @@ export class TurnActionEngine implements ITurnActionEngine {
             }
 
             const crossObjectState = this.__BuildCrossObjectState(objects, templateCache);
+            const crossObjectIndexMap = this.__BuildCrossObjectIndexMap(objects, templateCache);
+            const organizationCrossObjectMap = this.__BuildOrganizationCrossObjectMap(objects, templateCache);
 
             for (const gameObject of objects) {
                 const template = templateCache.get(gameObject.templateUid);
@@ -80,8 +82,16 @@ export class TurnActionEngine implements ITurnActionEngine {
                     templateCache,
                     crossObjectState,
                     batchUpdates,
+                    organizationCrossObjectMap.get(gameObject.organizationUid),
                 );
                 allResults.push(...objectResults);
+
+                this.__UpdateCrossObjectState(
+                    gameObject,
+                    crossObjectState,
+                    crossObjectIndexMap,
+                    batchUpdates,
+                );
             }
 
             // Persist all parameter changes in one transaction
@@ -140,14 +150,14 @@ export class TurnActionEngine implements ITurnActionEngine {
     }
 
     /**
-     * @brief Execute a list of actions against a single game object applying inline targets to remote objects and local expressions to the source
+     * @brief Execute all actions for one object accumulating remote state across actions and queuing batch updates only after all actions complete
      * @param gameObject IGameObject The source object instance
-     * @param actions IActionDefinition[] Sorted actions to execute
-     * @param allObjects IGameObject[] All game objects in the game
-     * @param templateCache Map<string, IGameObjectTemplate> Cached templates
+     * @param actions IActionDefinition array Sorted actions to execute
+     * @param allObjects IGameObject array All game objects in the game
+     * @param templateCache Map of templateUid to IGameObjectTemplate
      * @param crossObjectState CrossObjectState Cross object state for remote references in RHS
      * @param batchUpdates Array Accumulator for batch persistence updates
-     * @returns IActionExecutionResult[] One result per action
+     * @returns IActionExecutionResult array One result per action
      */
     private __ExecuteActionsForObject(
         gameObject: IGameObject,
@@ -156,65 +166,52 @@ export class TurnActionEngine implements ITurnActionEngine {
         templateCache: Map<string, IGameObjectTemplate>,
         crossObjectState: CrossObjectState,
         batchUpdates: Array<{ objectUid: string; parameters: IParameterValue[] }>,
+        organizationScopedState?: OrganizationScopedCrossObjectState,
     ): IActionExecutionResult[] {
         const results: IActionExecutionResult[] = [];
 
-        // Build mutable numeric state for the source object used for local assignments and RHS evaluation
-        const sourceState: Record<string, number> = {};
-        for (const parameter of gameObject.parameters) {
-            if (typeof parameter.value === `number`) {
-                sourceState[parameter.key] = parameter.value;
-            } else if (typeof parameter.value === `string`) {
-                const parsed = parseFloat(parameter.value);
-                if (!isNaN(parsed)) {
-                    sourceState[parameter.key] = parsed;
-                }
-            }
-        }
+        const sourceState = this.__BuildNumericState(gameObject.parameters);
+
+        const mutatedRemoteStates = new Map<string, { object: IGameObject; state: Record<string, number> }>();
 
         for (const action of actions) {
             const executionErrors: IActionExecutionError[] = [];
             let actionSucceeded = true;
-            /** Track which remote objects were mutated and their states keyed by uid */
-            const mutatedRemoteStates = new Map<string, { object: IGameObject; state: Record<string, number> }>();
 
-            for (let expressionIndex = 0; expressionIndex < action.expressions.length; expressionIndex++) {
-                const expression = action.expressions[expressionIndex];
+            for (const expression of action.expressions) {
                 const target = this._evaluator.ParseTarget(expression);
 
                 if (target.isInlineTarget && target.templateName && target.remoteKey) {
-                    // Inline target applies expression to all objects of the named template
-                    const remoteObjects = this.__FindObjectsByTemplateName(
+                    let remoteObjects = this.__FindObjectsByTemplateName(
                         target.templateName,
                         allObjects,
                         templateCache,
                     );
 
+                    if (target.isOrganizationScoped) {
+                        const sourceOrgUid = gameObject.organizationUid;
+                        remoteObjects = remoteObjects.filter(remoteObject => {
+                            return remoteObject.organizationUid === sourceOrgUid;
+                        });
+                    }
+
                     if (remoteObjects.length === 0) {
+                        const scopeLabel = target.isOrganizationScoped ? `organization-scoped ` : ``;
                         executionErrors.push({
                             expression,
-                            message: `No objects found for inline target template "${target.templateName}".`,
+                            message: `No objects found for ${scopeLabel}inline target template "${target.templateName}".`,
                         });
                         actionSucceeded = false;
                         break;
                     }
 
                     for (const remoteObject of remoteObjects) {
-                        // Lazily build or reuse the remote object mutable state
                         let remoteEntry = mutatedRemoteStates.get(remoteObject.uid);
                         if (!remoteEntry) {
-                            const remoteState: Record<string, number> = {};
-                            for (const parameter of remoteObject.parameters) {
-                                if (typeof parameter.value === `number`) {
-                                    remoteState[parameter.key] = parameter.value;
-                                } else if (typeof parameter.value === `string`) {
-                                    const parsed = parseFloat(parameter.value);
-                                    if (!isNaN(parsed)) {
-                                        remoteState[parameter.key] = parsed;
-                                    }
-                                }
-                            }
-                            remoteEntry = { object: remoteObject, state: remoteState };
+                            remoteEntry = {
+                                object: remoteObject,
+                                state: this.__BuildNumericState(remoteObject.parameters),
+                            };
                             mutatedRemoteStates.set(remoteObject.uid, remoteEntry);
                         }
 
@@ -223,6 +220,7 @@ export class TurnActionEngine implements ITurnActionEngine {
                             expression,
                             crossObjectState,
                             remoteEntry.state,
+                            organizationScopedState,
                         );
 
                         if (!expressionResult.success) {
@@ -239,11 +237,12 @@ export class TurnActionEngine implements ITurnActionEngine {
                         break;
                     }
                 } else {
-                    // Local expression mutates the source object state
                     const expressionResult = this._evaluator.Evaluate(
                         sourceState,
                         expression,
                         crossObjectState,
+                        undefined,
+                        organizationScopedState,
                     );
 
                     if (!expressionResult.success) {
@@ -257,7 +256,6 @@ export class TurnActionEngine implements ITurnActionEngine {
                 }
             }
 
-            // Collect updated parameters for the source object
             const updatedSourceParameters: IParameterValue[] = gameObject.parameters.map(parameter => {
                 if (parameter.key in sourceState) {
                     return { key: parameter.key, value: sourceState[parameter.key] };
@@ -273,20 +271,24 @@ export class TurnActionEngine implements ITurnActionEngine {
                 errors: executionErrors,
                 executedAt: new Date().toISOString(),
             });
+        }
 
-            // Queue source object update
-            this.__QueueBatchUpdate(batchUpdates, gameObject.uid, updatedSourceParameters);
-
-            // Queue updates for any mutated remote objects
-            for (const [remoteUid, remoteEntry] of mutatedRemoteStates) {
-                const updatedRemoteParameters: IParameterValue[] = remoteEntry.object.parameters.map(parameter => {
-                    if (parameter.key in remoteEntry.state) {
-                        return { key: parameter.key, value: remoteEntry.state[parameter.key] };
-                    }
-                    return { ...parameter };
-                });
-                this.__QueueBatchUpdate(batchUpdates, remoteUid, updatedRemoteParameters);
+        const finalSourceParameters: IParameterValue[] = gameObject.parameters.map(parameter => {
+            if (parameter.key in sourceState) {
+                return { key: parameter.key, value: sourceState[parameter.key] };
             }
+            return { ...parameter };
+        });
+        this.__QueueBatchUpdate(batchUpdates, gameObject.uid, finalSourceParameters);
+
+        for (const [remoteUid, remoteEntry] of mutatedRemoteStates) {
+            const updatedRemoteParameters: IParameterValue[] = remoteEntry.object.parameters.map(parameter => {
+                if (parameter.key in remoteEntry.state) {
+                    return { key: parameter.key, value: remoteEntry.state[parameter.key] };
+                }
+                return { ...parameter };
+            });
+            this.__QueueBatchUpdate(batchUpdates, remoteUid, updatedRemoteParameters);
         }
 
         return results;
@@ -354,22 +356,130 @@ export class TurnActionEngine implements ITurnActionEngine {
                 state[template.name] = [];
             }
 
-            const numericParams: Record<string, number> = {};
-            for (const parameter of gameObject.parameters) {
-                if (typeof parameter.value === `number`) {
-                    numericParams[parameter.key] = parameter.value;
-                } else if (typeof parameter.value === `string`) {
-                    const parsed = parseFloat(parameter.value);
-                    if (!isNaN(parsed)) {
-                        numericParams[parameter.key] = parsed;
-                    }
-                }
-            }
-
-            state[template.name].push(numericParams);
+            state[template.name].push(this.__BuildNumericState(gameObject.parameters));
         }
 
         return state;
+    }
+
+    /**
+     * @brief Builds a map from organization UID to a cross object state containing only objects owned by that organization
+     * @param allObjects IGameObject array All objects in the game
+     * @param templateCache Map of templateUid to IGameObjectTemplate
+     * @returns Map of organizationUid to OrganizationScopedCrossObjectState
+     */
+    private __BuildOrganizationCrossObjectMap(
+        allObjects: IGameObject[],
+        templateCache: Map<string, IGameObjectTemplate>,
+    ): Map<string, OrganizationScopedCrossObjectState> {
+        const organizationMap = new Map<string, OrganizationScopedCrossObjectState>();
+
+        for (const gameObject of allObjects) {
+            const template = templateCache.get(gameObject.templateUid);
+            if (!template) {
+                continue;
+            }
+
+            const orgUid = gameObject.organizationUid;
+            let orgState = organizationMap.get(orgUid);
+            if (!orgState) {
+                orgState = {};
+                organizationMap.set(orgUid, orgState);
+            }
+
+            if (!orgState[template.name]) {
+                orgState[template.name] = [];
+            }
+
+            orgState[template.name].push(this.__BuildNumericState(gameObject.parameters));
+        }
+
+        return organizationMap;
+    }
+
+    /**
+     * @brief Converts parameter values to a mutable numeric state map coercing strings and booleans
+     * @param parameters IParameterValue array Source parameter values
+     * @returns Record of string to number Numeric state map for expression evaluation
+     */
+    private __BuildNumericState(parameters: IParameterValue[]): Record<string, number> {
+        const numericState: Record<string, number> = {};
+
+        for (const parameter of parameters) {
+            if (typeof parameter.value === `number`) {
+                numericState[parameter.key] = parameter.value;
+            } else if (typeof parameter.value === `boolean`) {
+                numericState[parameter.key] = parameter.value ? 1 : 0;
+            } else if (typeof parameter.value === `string`) {
+                const parsed = parseFloat(parameter.value);
+                if (!isNaN(parsed)) {
+                    numericState[parameter.key] = parsed;
+                }
+            }
+        }
+
+        return numericState;
+    }
+
+    /**
+     * @brief Refreshes the crossObjectState entry for a just-processed object using its queued batch update state
+     * @param gameObject IGameObject The object that was just processed
+     * @param crossObjectState CrossObjectState Mutable cross object state to update
+     * @param indexMap Map of objectUid to templateName and array index
+     * @param batchUpdates Array Queued batch updates containing the latest parameter state
+     */
+    private __UpdateCrossObjectState(
+        gameObject: IGameObject,
+        crossObjectState: CrossObjectState,
+        indexMap: Map<string, { templateName: string; index: number }>,
+        batchUpdates: Array<{ objectUid: string; parameters: IParameterValue[] }>,
+    ): void {
+        const queuedUpdate = batchUpdates.find(entry => {
+            return entry.objectUid === gameObject.uid;
+        });
+
+        if (!queuedUpdate) {
+            return;
+        }
+
+        const mapping = indexMap.get(gameObject.uid);
+        if (!mapping) {
+            return;
+        }
+
+        const templateObjects = crossObjectState[mapping.templateName];
+        if (!templateObjects || mapping.index >= templateObjects.length) {
+            return;
+        }
+
+        templateObjects[mapping.index] = this.__BuildNumericState(queuedUpdate.parameters);
+    }
+
+    /**
+     * @brief Builds a map from object UID to its position in the crossObjectState arrays
+     * @param allObjects IGameObject array All objects in the game
+     * @param templateCache Map of templateUid to IGameObjectTemplate
+     * @returns Map of objectUid to templateName and array index
+     */
+    private __BuildCrossObjectIndexMap(
+        allObjects: IGameObject[],
+        templateCache: Map<string, IGameObjectTemplate>,
+    ): Map<string, { templateName: string; index: number }> {
+        const indexMap = new Map<string, { templateName: string; index: number }>();
+        const templateCounters = new Map<string, number>();
+
+        for (const gameObject of allObjects) {
+            const template = templateCache.get(gameObject.templateUid);
+            if (!template) {
+                continue;
+            }
+
+            const currentIndex = templateCounters.get(template.name) ?? 0;
+            indexMap.set(gameObject.uid, { templateName: template.name, index: currentIndex });
+            templateCounters.set(template.name, currentIndex + 1);
+        }
+
+        return indexMap;
     }
 
 }

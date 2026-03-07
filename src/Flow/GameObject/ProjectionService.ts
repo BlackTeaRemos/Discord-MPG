@@ -170,23 +170,23 @@ export async function SyncProjectionsAfterTurn(
                         parameters: syncedParameters,
                     });
                 } else {
-                    const staledParameters = projection.knownParameters.map(parameter => {
-                        return {
-                            ...parameter,
-                            isStale: true,
-                        };
+                    const alreadyStale = projection.knownParameters.every(parameter => {
+                        return parameter.isStale;
                     });
 
-                    parameterUpdates.push({
-                        projectionUid: projection.uid,
-                        knownParameters: staledParameters,
-                    });
+                    if (!alreadyStale) {
+                        const staledParameters = projection.knownParameters.map(parameter => {
+                            return {
+                                ...parameter,
+                                isStale: true,
+                            };
+                        });
 
-                    snapshotEntries.push({
-                        projectionUid: projection.uid,
-                        turn,
-                        parameters: staledParameters,
-                    });
+                        parameterUpdates.push({
+                            projectionUid: projection.uid,
+                            knownParameters: staledParameters,
+                        });
+                    }
                 }
             }
         }

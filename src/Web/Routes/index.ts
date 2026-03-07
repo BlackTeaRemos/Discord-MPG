@@ -8,4 +8,6 @@ export { RegisterPreviewRoutes } from './PreviewRoutes.js';
 export { RegisterGameRoutes } from './GameRoutes.js';
 export { RegisterAuditRoutes } from './AuditRoutes.js';
 export { RegisterMetricsRoutes } from './MetricsRoutes.js';
+export { RegisterTagRoutes } from './TagRoutes.js';
+export { RegisterDiplomacyRoutes } from './DiplomacyRoutes.js';
 export type { IRouteContext } from './IRouteContext.js';

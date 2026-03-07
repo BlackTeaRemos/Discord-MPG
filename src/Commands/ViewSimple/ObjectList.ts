@@ -4,6 +4,7 @@ import type { InteractionExecutionContextCarrier } from '../../Common/Type/Inter
 import { ListGamesForServer } from '../../Flow/Object/Game/ListGamesForServer.js';
 import { GameObjectTemplateRepository } from '../../Repository/GameObject/GameObjectTemplateRepository.js';
 import { GameObjectRepository } from '../../Repository/GameObject/GameObjectRepository.js';
+import { ObjectProjectionRepository } from '../../Repository/GameObject/ObjectProjectionRepository.js';
 import { Log } from '../../Common/Log.js';
 import { ResolveViewAccess } from './ResolveViewAccess.js';
 import { TranslateFromContext } from '../../Services/I18nService.js';
@@ -89,6 +90,18 @@ export async function ExecuteViewObjectList(
             return;
         }
 
+        const projectionNameMap = new Map<string, string>();
+        if (access.organizationUid) {
+            const projectionRepository = new ObjectProjectionRepository();
+            const orgProjections = await projectionRepository.ListByOrganization(
+                access.organizationUid,
+                { status: `ACTIVE` },
+            );
+            for (const projection of orgProjections) {
+                projectionNameMap.set(projection.objectUid, projection.name);
+            }
+        }
+
         const templateRepository = new GameObjectTemplateRepository();
         const templateNameCache = new Map<string, string>();
 
@@ -116,7 +129,7 @@ export async function ExecuteViewObjectList(
                     templateNameCache.set(gameObject.templateUid, templateName);
                 }
 
-                objectLines.push(`**${gameObject.name}** (${templateName}) \`${gameObject.uid}\``);
+                objectLines.push(`**${projectionNameMap.get(gameObject.uid) ?? gameObject.name}** (${templateName}) \`${gameObject.uid}\``);
             }
 
             const headerLine = templateFilterName

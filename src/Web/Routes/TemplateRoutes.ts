@@ -17,6 +17,7 @@ import {
     TemplateSchema,
     TemplateBodySchema,
     SuccessResponseSchema,
+    ValidationErrorResponseSchema,
 } from './ApiSchemas.js';
 
 const LOG_TAG = `Web/TemplateRoutes`;
@@ -47,6 +48,7 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
                                     uid: { type: `string`, description: `Template unique identifier` },
                                     name: { type: `string`, description: `Template display name` },
                                     description: { type: `string`, description: `Template purpose` },
+                                    tags: { type: `array`, items: { type: `array`, items: { type: `string` } } },
                                     parameters: { type: `array`, items: ParameterDefinitionSchema },
                                     actions: { type: `array`, items: ActionDefinitionSchema },
                                 },
@@ -81,6 +83,7 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
                             description: (properties.description as string) ?? ``,
                             parameters: properties.parameters_json ? JSON.parse(properties.parameters_json as string) : [],
                             actions: properties.actions_json ? JSON.parse(properties.actions_json as string) : [],
+                            tags: properties.tags_json ? JSON.parse(properties.tags_json as string) : [],
                             displayConfig: properties.display_config_json ? JSON.parse(properties.display_config_json as string) : undefined,
                             projectionDisplayConfigs: properties.projection_display_configs_json ? JSON.parse(properties.projection_display_configs_json as string) : undefined,
                             createdAt: properties.createdAt as string,
@@ -99,6 +102,7 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
                     uid: template.uid,
                     name: template.name,
                     description: template.description,
+                    tags: template.tags ?? [],
                     parameters: template.parameters.map(parameter => {
                         return {
                             key: parameter.key,
@@ -197,8 +201,8 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
             knownTemplateParams.set(currentName, currentParamKeys);
 
             const crossRefErrors: ICrossReferenceError[] = [];
-            const crossRefPattern = /@([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)/g;
-            const inlineTargetPattern = /^@([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\s*[+\-*/]?=/;
+            const crossRefPattern = /@(?:own\.)?([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)/g;
+            const inlineTargetPattern = /^@(?:own\.)?([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\s*[+\-*/]?=/;
 
             if (Array.isArray(template.actions)) {
                 const actions = template.actions as Array<{ key: string; expressions: string[] }>;
@@ -322,7 +326,7 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
             body: TemplateBodySchema,
             response: {
                 201: TemplateSchema,
-                400: ErrorResponseSchema,
+                400: ValidationErrorResponseSchema,
                 500: ErrorResponseSchema,
             },
         },
@@ -331,7 +335,11 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
             const body = request.body;
             const validationResult = ValidateTemplateWithExpressions(body, context.expressionEvaluator);
             if (!validationResult.valid) {
-                return reply.status(400).send({ error: validationResult.structuralErrors.join(`; `) });
+                return reply.status(400).send({
+                    error: `Template validation failed`,
+                    structuralErrors: validationResult.structuralErrors,
+                    expressionErrors: validationResult.expressionErrors,
+                });
             }
 
             const template = await context.templateRepository.Create({
@@ -340,6 +348,7 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
                 description: (body.description as string) ?? ``,
                 parameters: body.parameters as IGameObjectTemplate[`parameters`],
                 actions: body.actions as IGameObjectTemplate[`actions`],
+                tags: (body.tags as IGameObjectTemplate[`tags`]) ?? [],
                 displayConfig: body.displayConfig as IGameObjectTemplate[`displayConfig`],
             });
 
@@ -365,7 +374,7 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
             body: TemplateBodySchema,
             response: {
                 200: TemplateSchema,
-                400: ErrorResponseSchema,
+                400: ValidationErrorResponseSchema,
                 404: ErrorResponseSchema,
                 500: ErrorResponseSchema,
             },
@@ -380,7 +389,11 @@ export function RegisterTemplateRoutes(fastify: FastifyInstance, context: IRoute
             const body = request.body;
             const validationResult = ValidateTemplateWithExpressions(body, context.expressionEvaluator);
             if (!validationResult.valid) {
-                return reply.status(400).send({ error: validationResult.structuralErrors.join(`; `) });
+                return reply.status(400).send({
+                    error: `Template validation failed`,
+                    structuralErrors: validationResult.structuralErrors,
+                    expressionErrors: validationResult.expressionErrors,
+                });
             }
 
             const updated = await context.templateRepository.Update(request.params.uid, {

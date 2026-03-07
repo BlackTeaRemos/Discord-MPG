@@ -33,6 +33,7 @@ function __MapNodeToTemplate(properties: Record<string, any>): IGameObjectTempla
         description: properties.description ?? ``,
         parameters: JSON.parse(properties.parameters_json ?? `[]`),
         actions: JSON.parse(properties.actions_json ?? `[]`),
+        tags: JSON.parse(properties.tags_json ?? `[]`),
         createdAt: properties.createdAt,
         updatedAt: properties.updatedAt,
     };
@@ -68,6 +69,7 @@ export class GameObjectTemplateRepository implements IGameObjectTemplateReposito
             const now = new Date().toISOString();
             const parametersJson = JSON.stringify(template.parameters);
             const actionsJson = JSON.stringify(template.actions);
+            const tagsJson = JSON.stringify(template.tags ?? []);
             const displayConfigJson = template.displayConfig
                 ? JSON.stringify(template.displayConfig)
                 : null;
@@ -84,6 +86,7 @@ export class GameObjectTemplateRepository implements IGameObjectTemplateReposito
                     description: $description,
                     parameters_json: $parametersJson,
                     actions_json: $actionsJson,
+                    tags_json: $tagsJson,
                     display_config_json: $displayConfigJson,
                     projection_display_configs_json: $projectionDisplayConfigsJson,
                     createdAt: $now,
@@ -100,6 +103,7 @@ export class GameObjectTemplateRepository implements IGameObjectTemplateReposito
                 description: template.description ?? ``,
                 parametersJson,
                 actionsJson,
+                tagsJson,
                 displayConfigJson,
                 projectionDisplayConfigsJson,
                 now,
@@ -155,6 +159,21 @@ export class GameObjectTemplateRepository implements IGameObjectTemplateReposito
                 `MATCH (game:Game { uid: $gameUid })-[:${REL_HAS_TEMPLATE}]->(tpl:${TEMPLATE_LABEL})
                  RETURN tpl ORDER BY tpl.name`,
                 { gameUid },
+            );
+
+            return result.records.map(record => {
+                return __MapNodeToTemplate(record.get(`tpl`).properties);
+            });
+        } finally {
+            await session.close();
+        }
+    }
+
+    public async ListAll(): Promise<IGameObjectTemplate[]> {
+        const session = await neo4jClient.GetSession(`READ`);
+        try {
+            const result = await session.run(
+                `MATCH (tpl:${TEMPLATE_LABEL}) RETURN tpl ORDER BY tpl.name`,
             );
 
             return result.records.map(record => {
@@ -224,6 +243,11 @@ export class GameObjectTemplateRepository implements IGameObjectTemplateReposito
             if (updates.actions !== undefined) {
                 setClauses.push(`tpl.actions_json = $actionsJson`);
                 params.actionsJson = JSON.stringify(updates.actions);
+            }
+
+            if (updates.tags !== undefined) {
+                setClauses.push(`tpl.tags_json = $tagsJson`);
+                params.tagsJson = JSON.stringify(updates.tags);
             }
 
             if (updates.displayConfig !== undefined) {

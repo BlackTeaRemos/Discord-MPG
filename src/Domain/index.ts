@@ -33,3 +33,6 @@ export type {
 
 // Execution Context Implementation
 export { CommandExecutionContextImpl, CreateExecutionContext as createExecutionContext } from './ExecutionContext.js';
+
+export type { TagSegment, TagPath, ITagTrieNode, ITagTrie } from './Tag/index.js';
+export { TAG_WILDCARD } from './Tag/index.js';

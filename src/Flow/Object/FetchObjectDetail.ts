@@ -37,60 +37,66 @@ const _INTERNAL_PROPERTIES = new Set([
 ]);
 
 /**
- * @brief Fetches complete detail for any object node by UID including all properties parameters and relationships
+ * @brief Fetches complete detail for any object node by UID using separate queries for node and relationships to avoid cartesian products
  * @param uid string Object unique identifier
+ * @param includeHistory boolean Whether to include parameter snapshots
  * @returns ObjectDetail or null Full detail or null if not found
- * @example
- * const detail = await FetchObjectDetail('game_abc123');
- * // detail.properties -> { name: '...', image: '...' }
- * // detail.parameters -> { currentTurn: '3' }
- * // detail.relationships -> [{ relationshipType: 'HAS_GAME', ... }]
  */
 export async function FetchObjectDetail(uid: string, includeHistory: boolean = false): Promise<ObjectDetail | null> {
     const session = await neo4jClient.GetSession(`READ`);
     try {
-        const query = `
+        const nodeQuery = `
             MATCH (n { uid: $uid })
             OPTIONAL MATCH (n)-[:HAS_PARAMETER]->(param:Parameter)
-            OPTIONAL MATCH (n)-[outRel]->(outTarget)
-            WHERE NOT outTarget:Parameter
-            OPTIONAL MATCH (n)<-[inRel]-(inSource)
             RETURN n,
                    labels(n) AS nodeLabels,
-                   collect(DISTINCT { key: param.key, value: param.value }) AS params,
-                   collect(DISTINCT {
-                       relType: type(outRel),
-                       direction: 'outgoing',
-                       uid: outTarget.uid,
-                       name: coalesce(outTarget.name, outTarget.friendly_name, outTarget.uid, ''),
-                       labels: labels(outTarget)
-                   }) AS outgoing,
-                   collect(DISTINCT {
-                       relType: type(inRel),
-                       direction: 'incoming',
-                       uid: inSource.uid,
-                       name: coalesce(inSource.name, inSource.friendly_name, inSource.uid, ''),
-                       labels: labels(inSource)
-                   }) AS incoming
+                   collect(DISTINCT { key: param.key, value: param.value }) AS params
         `;
 
-        const result = await session.run(query, { uid });
-        const record = result.records[0];
-        if (!record) {
+        const nodeResult = await session.run(nodeQuery, { uid });
+        const nodeRecord = nodeResult.records[0];
+        if (!nodeRecord) {
             return null;
         }
 
-        const node = record.get(`n`);
-        const nodeLabels = record.get(`nodeLabels`) as string[];
-        const rawParams = record.get(`params`) as Array<{ key: string | null; value: unknown }>;
-        const rawOutgoing = record.get(`outgoing`) as Array<{
+        const node = nodeRecord.get(`n`);
+        const nodeLabels = nodeRecord.get(`nodeLabels`) as string[];
+        const rawParams = nodeRecord.get(`params`) as Array<{ key: string | null; value: unknown }>;
+
+        const relationshipQuery = `
+            MATCH (n { uid: $uid })
+            OPTIONAL MATCH (n)-[outRel]->(outTarget)
+            WHERE NOT outTarget:Parameter
+            WITH collect(DISTINCT {
+                relType: type(outRel),
+                direction: 'outgoing',
+                uid: outTarget.uid,
+                name: coalesce(outTarget.name, outTarget.friendly_name, outTarget.uid, ''),
+                labels: labels(outTarget)
+            })[0..200] AS outgoing
+            MATCH (n { uid: $uid })
+            OPTIONAL MATCH (n)<-[inRel]-(inSource)
+            WITH outgoing, collect(DISTINCT {
+                relType: type(inRel),
+                direction: 'incoming',
+                uid: inSource.uid,
+                name: coalesce(inSource.name, inSource.friendly_name, inSource.uid, ''),
+                labels: labels(inSource)
+            })[0..200] AS incoming
+            RETURN outgoing, incoming
+        `;
+
+        const relResult = await session.run(relationshipQuery, { uid });
+        const relRecord = relResult.records[0];
+
+        const rawOutgoing = (relRecord?.get(`outgoing`) ?? []) as Array<{
             relType: string | null;
             direction: string;
             uid: string | null;
             name: string;
             labels: string[];
         }>;
-        const rawIncoming = record.get(`incoming`) as Array<{
+        const rawIncoming = (relRecord?.get(`incoming`) ?? []) as Array<{
             relType: string | null;
             direction: string;
             uid: string | null;

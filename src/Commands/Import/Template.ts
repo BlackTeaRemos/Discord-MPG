@@ -10,6 +10,8 @@ import { GameObjectRepository } from '../../Repository/GameObject/GameObjectRepo
 import { TranslateFromContext } from '../../Services/I18nService.js';
 import type { IActionDefinition } from '../../Domain/GameObject/Action/IActionDefinition.js';
 import type { ITemplateDisplayConfig } from '../../Domain/GameObject/Display/ITemplateDisplayConfig.js';
+import type { TagPath } from '../../Domain/Tag/index.js';
+import { templateTagService } from '../../Services/TemplateTagService.js';
 
 /** Log tag for this module */
 const LOG_TAG = `Commands/Import/Template`;
@@ -106,6 +108,14 @@ export async function ExecuteImportTemplate(
             }
             : undefined;
 
+        const tags: TagPath[] = (templateSchema.tags ?? []).map(tagString => {
+            return tagString.split(`/`).map(segment => {
+                return segment.trim().toLowerCase();
+            }).filter(segment => {
+                return segment.length > 0;
+            });
+        });
+
         // Check if a template with the same name already exists
         const existingTemplate = await templateRepository.FindByName(game.uid, templateSchema.name);
 
@@ -160,9 +170,12 @@ export async function ExecuteImportTemplate(
                             templateRepository,
                             objectRepository,
                             displayConfig,
+                            tags,
+                            analysis.affectedObjects,
                         );
 
                         if (mergeResult.success) {
+                            __SyncTagsAfterMerge(existingTemplate.gameUid, existingTemplate.uid, tags);
                             await interaction.editReply({
                                 content: `Template **${templateSchema.name}** merged. ${mergeResult.migratedObjectCount} objects migrated.`,
                                 components: [],
@@ -196,9 +209,12 @@ export async function ExecuteImportTemplate(
                     templateRepository,
                     objectRepository,
                     displayConfig,
+                    tags,
+                    analysis.affectedObjects,
                 );
 
                 if (mergeResult.success) {
+                    __SyncTagsAfterMerge(existingTemplate.gameUid, existingTemplate.uid, tags);
                     await interaction.editReply({
                         content: `Template **${templateSchema.name}** updated (merged). ${mergeResult.migratedObjectCount} objects migrated. No destructive changes.`,
                     });
@@ -220,7 +236,12 @@ export async function ExecuteImportTemplate(
             parameters: templateSchema.parameters,
             actions: actionDefinitions,
             displayConfig,
+            tags,
         });
+
+        for (const tagPath of tags) {
+            templateTagService.AddTag(game.uid, created.uid, tagPath);
+        }
 
         await interaction.editReply({
             content: `Template **${created.name}** created (uid: \`${created.uid}\`). ${created.parameters.length} parameters, ${created.actions.length} actions defined.`,
@@ -271,4 +292,14 @@ function __BuildMergeDiffSummary(analysis: IMergeAnalysisResult): string {
     }
 
     return lines.length > 0 ? `\`\`\`diff\n${lines.join(`\n`)}\n\`\`\`` : `No significant changes.`;
+}
+
+function __SyncTagsAfterMerge(gameUid: string, templateUid: string, newTags: TagPath[]): void {
+    const existingTags = templateTagService.GetTemplateTags(templateUid);
+    for (const existingTag of existingTags) {
+        templateTagService.RemoveTag(gameUid, templateUid, existingTag);
+    }
+    for (const tagPath of newTags) {
+        templateTagService.AddTag(gameUid, templateUid, tagPath);
+    }
 }

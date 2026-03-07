@@ -42,6 +42,7 @@ export function ValidateTemplateJson(input: unknown): TemplateValidationResult {
     const parameterKeys = __ValidateParameters(template, errors);
     __ValidateActions(template, parameterKeys, errors);
     __ValidateDisplayConfig(template, parameterKeys, errors);
+    __ValidateTags(template, errors);
 
     return { valid: errors.length === 0, errors };
 }
@@ -208,7 +209,64 @@ export function CastTemplateJson(input: unknown): TemplateJsonSchema {
         parameters,
         actions,
         displayConfig: raw.displayConfig ? __CastDisplayConfig(raw.displayConfig) : undefined,
+        tags: __CastTags(raw.tags),
     };
+}
+
+/**
+ * @brief Validates the optional tags array
+ * @param template Record of string to unknown Template object
+ * @param errors string array Accumulator for errors
+ */
+function __ValidateTags(template: Record<string, unknown>, errors: string[]): void {
+    if (template.tags === undefined || template.tags === null) {
+        return;
+    }
+
+    if (!Array.isArray(template.tags)) {
+        errors.push(`"tags" must be an array of strings when provided.`);
+        return;
+    }
+
+    const tags = template.tags as unknown[];
+    const seen = new Set<string>();
+
+    for (let tagIndex = 0; tagIndex < tags.length; tagIndex++) {
+        const tag = tags[tagIndex];
+        const prefix = `tags[${tagIndex}]`;
+
+        if (typeof tag !== `string` || (tag as string).trim().length === 0) {
+            errors.push(`${prefix}: must be a non-empty string.`);
+            continue;
+        }
+
+        const normalized = (tag as string).trim().toLowerCase();
+        if (seen.has(normalized)) {
+            errors.push(`${prefix}: duplicate tag "${tag}".`);
+        } else {
+            seen.add(normalized);
+        }
+
+        const segments = normalized.split(`/`).filter(segment => {
+            return segment.length > 0;
+        });
+
+        if (segments.length === 0) {
+            errors.push(`${prefix}: tag path produces no segments after parsing.`);
+        }
+    }
+}
+
+function __CastTags(rawTags: unknown): string[] {
+    if (!Array.isArray(rawTags)) {
+        return [];
+    }
+
+    return (rawTags as string[]).map(tag => {
+        return tag.trim();
+    }).filter(tag => {
+        return tag.length > 0;
+    });
 }
 
 /**

@@ -22,6 +22,8 @@ export interface IGameObjectTemplateRepository {
      */
     ListByGame(gameUid: string): Promise<IGameObjectTemplate[]>;
 
+    ListAll(): Promise<IGameObjectTemplate[]>;
+
     /**
      * @brief Find a template by name within a game
      * @param gameUid string Game identifier @example 'game_xyz789'

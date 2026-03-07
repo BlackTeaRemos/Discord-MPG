@@ -16,6 +16,8 @@ import {
     RegisterGameRoutes,
     RegisterAuditRoutes,
     RegisterMetricsRoutes,
+    RegisterTagRoutes,
+    RegisterDiplomacyRoutes,
 } from './Routes/index.js';
 
 const DEFAULT_PORT = 3500;
@@ -69,6 +71,7 @@ export class TemplateEditorServer {
                     { name: `Projections`, description: `Organization projection assignments` },
                     { name: `Audit`, description: `User action audit log` },
                     { name: `Metrics`, description: `System metrics and event counters` },
+                    { name: `Tags`, description: `Template tag management` },
                     { name: `Preview`, description: `Card preview rendering` },
                 ],
             },
@@ -93,6 +96,8 @@ export class TemplateEditorServer {
         RegisterGameRoutes(this._fastify);
         RegisterAuditRoutes(this._fastify);
         RegisterMetricsRoutes(this._fastify);
+        RegisterTagRoutes(this._fastify);
+        RegisterDiplomacyRoutes(this._fastify);
 
         await this._fastify.listen({ port: this._port, host: `0.0.0.0` });
         Log.info(`Template editor available at http://localhost:${this._port}`, LOG_TAG);

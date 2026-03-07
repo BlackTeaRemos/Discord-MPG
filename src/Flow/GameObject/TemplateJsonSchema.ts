@@ -52,6 +52,9 @@ export interface TemplateJsonSchema {
 
     /** Optional card display configuration controlling visual rendering. */
     displayConfig?: DisplayConfigSchema;
+
+    /** Optional hierarchical tag paths using / as separator @example ['combat/melee', 'equipment/weapon'] */
+    tags?: string[];
 }
 
 /**

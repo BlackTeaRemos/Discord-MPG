@@ -8,6 +8,8 @@ import type { ITemplateDisplayConfig } from '../../Domain/GameObject/Display/ITe
 import type { IProjectionDisplayProfile } from '../../Domain/GameObject/Display/IProjectionDisplayProfile.js';
 import type { IDisplayGroup } from '../../Domain/GameObject/Display/IDisplayGroup.js';
 import type { IParameterDisplayConfig } from '../../Domain/GameObject/Display/IParameterDisplayConfig.js';
+import { ResolveDefaultProjectionStyle } from '../../Domain/GameObject/Display/ProjectionStyleDefaults.js';
+import { ResolveDiplomaticStatus } from '../Organization/Diplomacy/ResolveDiplomaticStatus.js';
 
 const LOG_TAG = `Flow/Object/FetchProjectedObjectDetail`;
 
@@ -18,6 +20,7 @@ export interface ProjectedObjectDetail {
     detail: ObjectDetail;
     projection: IObjectProjection;
     resolvedDisplayConfig: ITemplateDisplayConfig | undefined;
+    isDefaultProjection: boolean;
 }
 
 /**
@@ -25,11 +28,13 @@ export interface ProjectedObjectDetail {
  *
  * Loads the raw ObjectDetail then replaces parameters_json with the projection known parameters
  * and resolves the full display config from the template projection display profile
+ * When no explicit projection exists for the org and object pair a default empty projection is
+ * synthesized that reveals the object existence but hides all parameters and actions
  *
  * @param objectUid string Object unique identifier
  * @param organizationUid string Viewing organization identifier
  * @param includeHistory boolean Whether to include parameter history
- * @returns ProjectedObjectDetail or null when no projection exists
+ * @returns ProjectedObjectDetail or null only when the object itself does not exist in the graph
  */
 export async function FetchProjectedObjectDetail(
     objectUid: string,
@@ -43,33 +48,85 @@ export async function FetchProjectedObjectDetail(
         objectUid,
     );
 
-    if (!projection) {
-        return null;
-    }
-
     const detail = await FetchObjectDetail(objectUid, includeHistory);
-
     if (!detail) {
-        Log.warning(
-            `Projection "${projection.uid}" exists but object "${objectUid}" not found in graph`,
-            LOG_TAG,
-        );
+        if (projection) {
+            Log.warning(
+                `Projection "${projection.uid}" exists but object "${objectUid}" not found in graph`,
+                LOG_TAG,
+            );
+        }
         return null;
     }
 
-    const projectedParametersJson = JSON.stringify(projection.knownParameters);
-    detail.properties.parameters_json = projectedParametersJson;
-    detail.properties.name = projection.name;
+    if (projection) {
+        detail.properties.parameters_json = JSON.stringify(projection.knownParameters);
+        detail.properties.name = projection.name;
 
-    const resolvedDisplayConfig = await __ResolveProjectionDisplayConfig(
-        projection.templateUid,
-        projection.displayStyle,
-    );
+        const resolvedDisplayConfig = await __ResolveProjectionDisplayConfig(
+            projection.templateUid,
+            projection.displayStyle,
+        );
+
+        return {
+            detail,
+            projection,
+            resolvedDisplayConfig,
+            isDefaultProjection: false,
+        };
+    }
+
+    return await __BuildDefaultProjectedDetail(detail, objectUid, organizationUid);
+}
+
+/**
+ * @brief Constructs a default projected view when no explicit projection exists for the organization
+ *
+ * The default projection reveals object existence and name but hides all parameters and actions
+ * This enforces least privilege for organizations that have not been granted a real projection
+ *
+ * @param detail ObjectDetail The ground truth detail to restrict
+ * @param objectUid string Object unique identifier
+ * @param organizationUid string Viewing organization identifier
+ * @returns ProjectedObjectDetail A restricted view with empty parameters
+ */
+async function __BuildDefaultProjectedDetail(
+    detail: ObjectDetail,
+    objectUid: string,
+    organizationUid: string,
+): Promise<ProjectedObjectDetail> {
+    const templateUid = String(detail.properties.templateUid ?? ``);
+    const objectOwnerUid = String(detail.properties.organizationUid ?? ``);
+    const gameUid = String(detail.properties.gameUid ?? ``);
+
+    let displayStyle = `UNKNOWN`;
+    if (objectOwnerUid && gameUid) {
+        displayStyle = await ResolveDiplomaticStatus(organizationUid, objectOwnerUid, gameUid);
+    }
+
+    detail.properties.parameters_json = JSON.stringify([]);
+    delete detail.properties.actions_json;
+    detail.parameterHistory = [];
+
+    const syntheticProjection: IObjectProjection = {
+        uid: `default_${organizationUid}_${objectUid}`,
+        objectUid,
+        templateUid,
+        organizationUid,
+        name: String(detail.properties.name ?? detail.uid),
+        displayStyle,
+        status: `ACTIVE`,
+        autoSync: false,
+        knownParameters: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+    };
 
     return {
         detail,
-        projection,
-        resolvedDisplayConfig,
+        projection: syntheticProjection,
+        resolvedDisplayConfig: ResolveDefaultProjectionStyle(displayStyle),
+        isDefaultProjection: true,
     };
 }
 
@@ -88,12 +145,12 @@ async function __ResolveProjectionDisplayConfig(
         const template = await templateRepository.GetByUid(templateUid);
 
         if (!template) {
-            return undefined;
+            return ResolveDefaultProjectionStyle(displayStyle);
         }
 
         const configMap = template.projectionDisplayConfigs;
         if (!configMap || !configMap[displayStyle]) {
-            return undefined;
+            return ResolveDefaultProjectionStyle(displayStyle);
         }
 
         const profile = configMap[displayStyle];
@@ -105,7 +162,7 @@ async function __ResolveProjectionDisplayConfig(
             `Failed to resolve projection display config for template "${templateUid}": ${String(error)}`,
             LOG_TAG,
         );
-        return undefined;
+        return ResolveDefaultProjectionStyle(displayStyle);
     }
 }
 

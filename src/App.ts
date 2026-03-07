@@ -15,6 +15,8 @@ import { flowManager } from './Common/Flow/Manager.js';
 import { BootDiscordClient } from './App/Boot.js';
 import { InitDiscord } from './App/DiscordInit.js';
 import { auditService } from './Services/AuditService.js';
+import { templateTagService } from './Services/TemplateTagService.js';
+import { GameObjectTemplateRepository } from './Repository/GameObject/GameObjectTemplateRepository.js';
 
 // Supported log levels with numeric severity where lower is more verbose
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
@@ -99,6 +101,8 @@ export class DiscordApp {
 
             auditService.Start();
 
+            await this.__initializeTagIndex();
+
             const discord = InitDiscord({
                 eventBus: this.eventBus,
                 client: client,
@@ -116,6 +120,16 @@ export class DiscordApp {
         } catch (err) {
             this.eventBus.Emit(EVENT_NAMES.output, `Fatal boot error: ${err}`);
             throw err;
+        }
+    }
+
+    private async __initializeTagIndex(): Promise<void> {
+        try {
+            const templateRepository = new GameObjectTemplateRepository();
+            const templates = await templateRepository.ListAll();
+            templateTagService.Initialize(templates);
+        } catch (err) {
+            Log.warning(`Tag index initialization skipped: ${String(err)}`, `App`);
         }
     }
 

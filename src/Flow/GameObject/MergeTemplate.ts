@@ -6,6 +6,8 @@ import type { IParameterValue } from '../../Domain/GameObject/Entity/IParameterV
 import type { IActionDefinition } from '../../Domain/GameObject/Action/IActionDefinition.js';
 import type { IGameObjectTemplateRepository } from '../../Domain/GameObject/Repository/IGameObjectTemplateRepository.js';
 import type { IGameObjectRepository } from '../../Domain/GameObject/Repository/IGameObjectRepository.js';
+import type { IGameObject } from '../../Domain/GameObject/Entity/IGameObject.js';
+import type { TagPath } from '../../Domain/Tag/index.js';
 
 /** Log tag for merge operations */
 const LOG_TAG = `Flow/GameObject/MergeTemplate`;
@@ -68,6 +70,9 @@ export interface IMergeAnalysisResult {
 
     /** List of action keys about to be removed as destructive changes */
     removedActionKeys: string[];
+
+    /** Pre fetched affected objects to avoid redundant queries in ExecuteMerge */
+    affectedObjects: IGameObject[];
 }
 
 /**
@@ -210,6 +215,7 @@ export async function AnalyzeMerge(
         actionChanges,
         removedParameterKeys,
         removedActionKeys,
+        affectedObjects: objects,
     };
 }
 
@@ -222,9 +228,9 @@ export async function AnalyzeMerge(
  * @param templateRepository IGameObjectTemplateRepository Template persistence
  * @param objectRepository IGameObjectRepository Object instance persistence
  * @param newDisplayConfig ITemplateDisplayConfig Optional updated display config
+ * @param newTags TagPath array Optional updated tag paths
+ * @param prefetchedObjects IGameObject array Optional pre fetched objects from AnalyzeMerge to avoid redundant queries
  * @returns IMergeExecutionResult Merge outcome
- * @example
- * const result = await ExecuteMerge(existing, newParams, newActions, 'desc', tplRepo, objRepo, displayConfig);
  */
 export async function ExecuteMerge(
     existingTemplate: IGameObjectTemplate,
@@ -234,20 +240,21 @@ export async function ExecuteMerge(
     templateRepository: IGameObjectTemplateRepository,
     objectRepository: IGameObjectRepository,
     newDisplayConfig?: ITemplateDisplayConfig,
+    newTags?: TagPath[],
+    prefetchedObjects?: IGameObject[],
 ): Promise<IMergeExecutionResult> {
     try {
-        // Update the template
         await templateRepository.Update(existingTemplate.uid, {
             description: newDescription,
             parameters: newParameters,
             actions: newActions,
             ...(newDisplayConfig !== undefined ? { displayConfig: newDisplayConfig } : {}),
+            ...(newTags !== undefined ? { tags: newTags } : {}),
         });
 
         Log.info(`Template "${existingTemplate.name}" definition updated.`, LOG_TAG);
 
-        // Migrate all object instances
-        const objects = await objectRepository.ListByGame(existingTemplate.gameUid, {
+        const objects = prefetchedObjects ?? await objectRepository.ListByGame(existingTemplate.gameUid, {
             templateUid: existingTemplate.uid,
         });
 
@@ -292,10 +299,10 @@ export async function ExecuteMerge(
 }
 
 /**
- * @brief Migrates object parameter values to the new template schema
+ * @brief Migrates object parameter values to the new template schema with type coercion
  * @param currentParameters IParameterValue array Current parameter values for the object
  * @param newParamMap Map of string to IParameterDefinition New parameter definitions keyed by key
- * @returns IParameterValue array Migrated parameter values
+ * @returns IParameterValue array Migrated parameter values with coerced types or defaults when coercion fails
  */
 function __MigrateObjectParameters(
     currentParameters: IParameterValue[],
@@ -312,10 +319,12 @@ function __MigrateObjectParameters(
         const existingValue = currentValueMap.get(key);
 
         if (existingValue) {
-            // Keep existing value even if type changed
-            migratedParameters.push(existingValue);
+            const coerced = __CoerceParameterValue(existingValue.value, definition.valueType);
+            migratedParameters.push({
+                key,
+                value: coerced !== undefined ? coerced : definition.defaultValue,
+            });
         } else {
-            // New parameter uses default from definition
             migratedParameters.push({
                 key,
                 value: definition.defaultValue,
@@ -324,4 +333,54 @@ function __MigrateObjectParameters(
     }
 
     return migratedParameters;
+}
+
+/**
+ * @brief Attempts to coerce a parameter value to the target type returning undefined when coercion is impossible
+ * @param value string or number or boolean Source value to coerce
+ * @param targetType string Target type name matching IParameterDefinition valueType
+ * @returns string or number or boolean or undefined Coerced value or undefined on failure
+ */
+function __CoerceParameterValue(
+    value: string | number | boolean,
+    targetType: string,
+): string | number | boolean | undefined {
+    const sourceType = typeof value;
+    if (sourceType === targetType) {
+        return value;
+    }
+
+    if (targetType === `number`) {
+        if (sourceType === `string`) {
+            const parsed = parseFloat(value as string);
+            return isNaN(parsed) ? undefined : parsed;
+        }
+        if (sourceType === `boolean`) {
+            return (value as boolean) ? 1 : 0;
+        }
+        return undefined;
+    }
+
+    if (targetType === `string`) {
+        return String(value);
+    }
+
+    if (targetType === `boolean`) {
+        if (sourceType === `number`) {
+            return (value as number) !== 0;
+        }
+        if (sourceType === `string`) {
+            const lower = (value as string).toLowerCase();
+            if (lower === `true` || lower === `1`) {
+                return true;
+            }
+            if (lower === `false` || lower === `0` || lower === ``) {
+                return false;
+            }
+            return undefined;
+        }
+        return undefined;
+    }
+
+    return undefined;
 }
